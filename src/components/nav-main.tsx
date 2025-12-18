@@ -1,6 +1,7 @@
 "use client"
 
 import { IconCirclePlusFilled, IconMail, type Icon } from "@tabler/icons-react"
+import * as React from "react"
 
 import { Button } from "@/components/ui/button"
 import {
@@ -13,12 +14,15 @@ import {
 
 export function NavMain({
   items,
+  onLogoutClick,
 }: {
   items: {
     title: string
     url: string
     icon?: Icon
+    isLogout?: boolean
   }[]
+  onLogoutClick?: (e: React.MouseEvent) => void
 }) {
   return (
     <SidebarGroup>
@@ -45,10 +49,20 @@ export function NavMain({
         <SidebarMenu>
           {items.map((item) => (
             <SidebarMenuItem key={item.title}>
-              <SidebarMenuButton tooltip={item.title}>
-                {item.icon && <item.icon />}
-                <span>{item.title}</span>
-              </SidebarMenuButton>
+              {item.isLogout ? (
+                <SidebarMenuButton 
+                  tooltip={item.title}
+                  onClick={onLogoutClick}
+                >
+                  {item.icon && <item.icon />}
+                  <span>{item.title}</span>
+                </SidebarMenuButton>
+              ) : (
+                <SidebarMenuButton tooltip={item.title}>
+                  {item.icon && <item.icon />}
+                  <span>{item.title}</span>
+                </SidebarMenuButton>
+              )}
             </SidebarMenuItem>
           ))}
         </SidebarMenu>

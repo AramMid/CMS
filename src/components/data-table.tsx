@@ -1,6 +1,8 @@
 "use client"
 
 import * as React from "react"
+import { useRouter } from "next/navigation"
+
 import {
   closestCenter,
   DndContext,
@@ -26,13 +28,12 @@ import {
   IconChevronRight,
   IconChevronsLeft,
   IconChevronsRight,
-  IconCircleCheckFilled,
   IconDotsVertical,
   IconGripVertical,
   IconLayoutColumns,
-  IconLoader,
   IconPlus,
-  IconTrendingUp,
+  IconEye,
+  IconPencil,
 } from "@tabler/icons-react"
 import {
   flexRender,
@@ -49,30 +50,11 @@ import {
   type SortingState,
   type VisibilityState,
 } from "@tanstack/react-table"
-import { Area, AreaChart, CartesianGrid, XAxis } from "recharts"
 import { toast } from "sonner"
-import { z } from "zod"
 
-import { useIsMobile } from "@/hooks/use-mobile"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
-import {
-  ChartContainer,
-  ChartTooltip,
-  ChartTooltipContent,
-  type ChartConfig,
-} from "@/components/ui/chart"
 import { Checkbox } from "@/components/ui/checkbox"
-import {
-  Drawer,
-  DrawerClose,
-  DrawerContent,
-  DrawerDescription,
-  DrawerFooter,
-  DrawerHeader,
-  DrawerTitle,
-  DrawerTrigger,
-} from "@/components/ui/drawer"
 import {
   DropdownMenu,
   DropdownMenuCheckboxItem,
@@ -99,29 +81,103 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table"
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import {
-  Tabs,
-  TabsContent,
-  TabsList,
-  TabsTrigger,
-} from "@/components/ui/tabs"
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog"
 
-export const schema = z.object({
-  id: z.number(),
-  header: z.string(),
-  type: z.string(),
-  status: z.string(),
-  target: z.string(),
-  limit: z.string(),
-  reviewer: z.string(),
-})
+/* =========================
+   Types (match your APIs)
+========================= */
 
-// Create a separate component for the drag handle
-function DragHandle({ id }: { id: number }) {
-  const { attributes, listeners } = useSortable({
-    id,
+// GET /api/user
+export type UserRow = {
+  id: number
+  email: string
+  first_name: string
+  last_name: string
+  phone: string | null
+  is_active: boolean
+}
+
+// GET /api/user/table (Trading Requests table)
+export type TradingRequestRow = {
+  id: number
+  email: string
+  first_name: string
+  last_name: string
+  UserBalance: { available_balance: string } | null
+}
+
+export type DataTablePayload = {
+  users: UserRow[]
+  requests: TradingRequestRow[]
+}
+
+// GET /api/user/detail/:id
+type UserDetail = {
+  id: number
+  email: string
+  first_name: string
+  last_name: string
+  phone: string | null
+  is_active: boolean
+}
+
+const API_BASE = process.env.NEXT_PUBLIC_API_BASE ?? "http://localhost:3001"
+
+/* =========================
+   Helpers
+========================= */
+
+function fullName(first: string, last: string) {
+  const name = `${first ?? ""} ${last ?? ""}`.trim()
+  return name || "(No name)"
+}
+
+function toNumber(value: unknown) {
+  const n = typeof value === "string" ? Number(value) : (value as number)
+  return Number.isFinite(n) ? n : 0
+}
+
+function formatVNDCompact(value: string | number) {
+  const num = typeof value === "string" ? Number(value) : value
+  if (!Number.isFinite(num)) return "0 ₫"
+
+  if (num >= 1_000_000_000) return `${(num / 1_000_000_000).toFixed(2).replace(/\.00$/, "")}B ₫`
+  if (num >= 1_000_000) return `${(num / 1_000_000).toFixed(2).replace(/\.00$/, "")}M ₫`
+  if (num >= 1_000) return `${(num / 1_000).toFixed(2).replace(/\.00$/, "")}K ₫`
+  return `${num.toLocaleString("vi-VN")} ₫`
+}
+
+async function fetchUserDetail(id: number): Promise<UserDetail> {
+  const res = await fetch(`${API_BASE}/api/user/detail/${id}`, { cache: "no-store" })
+  if (!res.ok) throw new Error("Failed to load user detail")
+  const json = (await res.json()) as { success: boolean; data: UserDetail }
+  return json.data
+}
+
+async function patchUser(id: number, payload: Partial<UserDetail>) {
+  const res = await fetch(`${API_BASE}/api/user/${id}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
   })
+  if (!res.ok) throw new Error("Update failed")
+  return res.json()
+}
 
+/* =========================
+   Drag handle
+========================= */
+
+function DragHandle({ id }: { id: number }) {
+  const { attributes, listeners } = useSortable({ id })
   return (
     <Button
       {...attributes}
@@ -136,7 +192,240 @@ function DragHandle({ id }: { id: number }) {
   )
 }
 
-const columns: ColumnDef<z.infer<typeof schema>>[] = [
+/* =========================
+   Popup for View/Edit
+========================= */
+
+function UserDetailDialog({
+  userId,
+  mode,
+  open,
+  onOpenChange,
+}: {
+  userId: number
+  mode: "view" | "edit"
+  open: boolean
+  onOpenChange: (v: boolean) => void
+}) {
+  const router = useRouter()
+  const isEdit = mode === "edit"
+
+  const [loading, setLoading] = React.useState(false)
+  const [saving, setSaving] = React.useState(false)
+  const [detail, setDetail] = React.useState<UserDetail | null>(null)
+
+  React.useEffect(() => {
+    if (!open) return
+    let mounted = true
+    setLoading(true)
+    fetchUserDetail(userId)
+      .then((d) => {
+        if (mounted) setDetail(d)
+      })
+      .catch((e: any) => {
+        toast.error(e?.message ?? "Load detail failed")
+        if (mounted) setDetail(null)
+      })
+      .finally(() => {
+        if (mounted) setLoading(false)
+      })
+    return () => {
+      mounted = false
+    }
+  }, [open, userId])
+
+  async function onConfirm() {
+    if (!detail) return
+    setSaving(true)
+    try {
+      await patchUser(detail.id, {
+        email: detail.email,
+        first_name: detail.first_name,
+        last_name: detail.last_name,
+        phone: detail.phone,
+        is_active: detail.is_active,
+      })
+      toast.success("Updated successfully")
+      onOpenChange(false)
+      router.refresh() // ✅ reload server data in page.tsx
+    } catch (e: any) {
+      toast.error(e?.message ?? "Update failed")
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="sm:max-w-[520px]">
+        <DialogHeader>
+          <DialogTitle>{isEdit ? "Edit user" : "View user"}</DialogTitle>
+          <DialogDescription>
+            {isEdit
+              ? "Admin can update user information and confirm changes."
+              : "Read-only user details."}
+          </DialogDescription>
+        </DialogHeader>
+
+        {loading ? (
+          <div className="text-muted-foreground py-6 text-sm">Loading...</div>
+        ) : !detail ? (
+          <div className="text-muted-foreground py-6 text-sm">No data.</div>
+        ) : (
+          <div className="grid gap-4">
+            <div className="grid grid-cols-2 gap-4">
+              <div className="flex flex-col gap-2">
+                <Label htmlFor={`first_${detail.id}`}>First name</Label>
+                <Input
+                  id={`first_${detail.id}`}
+                  value={detail.first_name ?? ""}
+                  disabled={!isEdit}
+                  onChange={(e) =>
+                    setDetail((p) => (p ? { ...p, first_name: e.target.value } : p))
+                  }
+                />
+              </div>
+
+              <div className="flex flex-col gap-2">
+                <Label htmlFor={`last_${detail.id}`}>Last name</Label>
+                <Input
+                  id={`last_${detail.id}`}
+                  value={detail.last_name ?? ""}
+                  disabled={!isEdit}
+                  onChange={(e) =>
+                    setDetail((p) => (p ? { ...p, last_name: e.target.value } : p))
+                  }
+                />
+              </div>
+            </div>
+
+            <div className="flex flex-col gap-2">
+              <Label htmlFor={`email_${detail.id}`}>Email</Label>
+              <Input
+                id={`email_${detail.id}`}
+                value={detail.email ?? ""}
+                disabled={!isEdit}
+                onChange={(e) =>
+                  setDetail((p) => (p ? { ...p, email: e.target.value } : p))
+                }
+              />
+            </div>
+
+            <div className="grid grid-cols-2 gap-4">
+              <div className="flex flex-col gap-2">
+                <Label htmlFor={`phone_${detail.id}`}>Phone</Label>
+                <Input
+                  id={`phone_${detail.id}`}
+                  value={detail.phone ?? ""}
+                  disabled={!isEdit}
+                  onChange={(e) =>
+                    setDetail((p) => (p ? { ...p, phone: e.target.value } : p))
+                  }
+                />
+              </div>
+
+              <div className="flex flex-col gap-2">
+                <Label>Status</Label>
+                <Select
+                  value={detail.is_active ? "active" : "inactive"}
+                  disabled={!isEdit}
+                  onValueChange={(v) =>
+                    setDetail((p) => (p ? { ...p, is_active: v === "active" } : p))
+                  }
+                >
+                  <SelectTrigger className="w-full">
+                    <SelectValue placeholder="Select status" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="active">Active</SelectItem>
+                    <SelectItem value="inactive">Inactive</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+            </div>
+          </div>
+        )}
+
+        <DialogFooter className="gap-2">
+          <Button variant="outline" onClick={() => onOpenChange(false)}>
+            Close
+          </Button>
+
+          {isEdit ? (
+            <Button onClick={onConfirm} disabled={saving || loading || !detail}>
+              {saving ? "Saving..." : "Confirm"}
+            </Button>
+          ) : null}
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+function UserRowActions({ userId }: { userId: number }) {
+  const [open, setOpen] = React.useState(false)
+  const [mode, setMode] = React.useState<"view" | "edit">("view")
+
+  return (
+    <>
+      <DropdownMenu>
+        <DropdownMenuTrigger asChild>
+          <Button
+            variant="ghost"
+            className="data-[state=open]:bg-muted text-muted-foreground flex size-8"
+            size="icon"
+          >
+            <IconDotsVertical />
+            <span className="sr-only">Open menu</span>
+          </Button>
+        </DropdownMenuTrigger>
+
+        <DropdownMenuContent align="end" className="w-44">
+          <DropdownMenuItem
+            className="gap-2"
+            onSelect={(e) => {
+              e.preventDefault()
+              setMode("view")
+              setOpen(true)
+            }}
+          >
+            <IconEye className="size-4" />
+            View
+          </DropdownMenuItem>
+
+          <DropdownMenuItem
+            className="gap-2"
+            onSelect={(e) => {
+              e.preventDefault()
+              setMode("edit")
+              setOpen(true)
+            }}
+          >
+            <IconPencil className="size-4" />
+            Edit
+          </DropdownMenuItem>
+
+          <DropdownMenuSeparator />
+
+          <DropdownMenuItem variant="destructive">Delete</DropdownMenuItem>
+        </DropdownMenuContent>
+      </DropdownMenu>
+
+      <UserDetailDialog
+        userId={userId}
+        mode={mode}
+        open={open}
+        onOpenChange={setOpen}
+      />
+    </>
+  )
+}
+
+/* =========================
+   Users table columns (phone instead of balance)
+========================= */
+
+const userColumns: ColumnDef<UserRow>[] = [
   {
     id: "drag",
     header: () => null,
@@ -169,149 +458,87 @@ const columns: ColumnDef<z.infer<typeof schema>>[] = [
     enableHiding: false,
   },
   {
-    accessorKey: "header",
-    header: "Header",
-    cell: ({ row }) => {
-      return <TableCellViewer item={row.original} />
-    },
+    id: "name",
+    header: "Name",
+    cell: ({ row }) => (
+      <div className="font-medium">{fullName(row.original.first_name, row.original.last_name)}</div>
+    ),
     enableHiding: false,
   },
   {
-    accessorKey: "type",
-    header: "Section Type",
+    accessorKey: "email",
+    header: "Email",
     cell: ({ row }) => (
-      <div className="w-32">
-        <Badge variant="outline" className="text-muted-foreground px-1.5">
-          {row.original.type}
-        </Badge>
+      <div className="max-w-[320px] truncate">{row.original.email}</div>
+    ),
+  },
+  {
+    accessorKey: "phone",
+    header: "Phone",
+    cell: ({ row }) => (
+      <div className="max-w-[220px] truncate">
+        {row.original.phone ?? "-"}
       </div>
     ),
   },
   {
-    accessorKey: "status",
+    accessorKey: "is_active",
     header: "Status",
     cell: ({ row }) => (
       <Badge variant="outline" className="text-muted-foreground px-1.5">
-        {row.original.status === "Done" ? (
-          <IconCircleCheckFilled className="fill-green-500 dark:fill-green-400" />
-        ) : (
-          <IconLoader />
-        )}
-        {row.original.status}
+        {row.original.is_active ? "Active" : "Inactive"}
       </Badge>
     ),
   },
   {
-    accessorKey: "target",
-    header: () => <div className="w-full text-right">Target</div>,
-    cell: ({ row }) => (
-      <form
-        onSubmit={(e) => {
-          e.preventDefault()
-          toast.promise(new Promise((resolve) => setTimeout(resolve, 1000)), {
-            loading: `Saving ${row.original.header}`,
-            success: "Done",
-            error: "Error",
-          })
-        }}
-      >
-        <Label htmlFor={`${row.original.id}-target`} className="sr-only">
-          Target
-        </Label>
-        <Input
-          className="hover:bg-input/30 focus-visible:bg-background dark:hover:bg-input/30 dark:focus-visible:bg-input/30 h-8 w-16 border-transparent bg-transparent text-right shadow-none focus-visible:border dark:bg-transparent"
-          defaultValue={row.original.target}
-          id={`${row.original.id}-target`}
-        />
-      </form>
-    ),
-  },
-  {
-    accessorKey: "limit",
-    header: () => <div className="w-full text-right">Limit</div>,
-    cell: ({ row }) => (
-      <form
-        onSubmit={(e) => {
-          e.preventDefault()
-          toast.promise(new Promise((resolve) => setTimeout(resolve, 1000)), {
-            loading: `Saving ${row.original.header}`,
-            success: "Done",
-            error: "Error",
-          })
-        }}
-      >
-        <Label htmlFor={`${row.original.id}-limit`} className="sr-only">
-          Limit
-        </Label>
-        <Input
-          className="hover:bg-input/30 focus-visible:bg-background dark:hover:bg-input/30 dark:focus-visible:bg-input/30 h-8 w-16 border-transparent bg-transparent text-right shadow-none focus-visible:border dark:bg-transparent"
-          defaultValue={row.original.limit}
-          id={`${row.original.id}-limit`}
-        />
-      </form>
-    ),
-  },
-  {
-    accessorKey: "reviewer",
-    header: "Reviewer",
-    cell: ({ row }) => {
-      const isAssigned = row.original.reviewer !== "Assign reviewer"
-
-      if (isAssigned) {
-        return row.original.reviewer
-      }
-
-      return (
-        <>
-          <Label htmlFor={`${row.original.id}-reviewer`} className="sr-only">
-            Reviewer
-          </Label>
-          <Select>
-            <SelectTrigger
-              className="w-38 **:data-[slot=select-value]:block **:data-[slot=select-value]:truncate"
-              size="sm"
-              id={`${row.original.id}-reviewer`}
-            >
-              <SelectValue placeholder="Assign reviewer" />
-            </SelectTrigger>
-            <SelectContent align="end">
-              <SelectItem value="Eddie Lake">Eddie Lake</SelectItem>
-              <SelectItem value="Jamik Tashpulatov">
-                Jamik Tashpulatov
-              </SelectItem>
-            </SelectContent>
-          </Select>
-        </>
-      )
-    },
-  },
-  {
     id: "actions",
-    cell: () => (
-      <DropdownMenu>
-        <DropdownMenuTrigger asChild>
-          <Button
-            variant="ghost"
-            className="data-[state=open]:bg-muted text-muted-foreground flex size-8"
-            size="icon"
-          >
-            <IconDotsVertical />
-            <span className="sr-only">Open menu</span>
-          </Button>
-        </DropdownMenuTrigger>
-        <DropdownMenuContent align="end" className="w-32">
-          <DropdownMenuItem>Edit</DropdownMenuItem>
-          <DropdownMenuItem>Make a copy</DropdownMenuItem>
-          <DropdownMenuItem>Favorite</DropdownMenuItem>
-          <DropdownMenuSeparator />
-          <DropdownMenuItem variant="destructive">Delete</DropdownMenuItem>
-        </DropdownMenuContent>
-      </DropdownMenu>
+    header: () => <div className="text-right">Actions</div>,
+    cell: ({ row }) => (
+      <div className="flex justify-end">
+        <UserRowActions userId={row.original.id} />
+      </div>
     ),
   },
 ]
 
-function DraggableRow({ row }: { row: Row<z.infer<typeof schema>> }) {
+/* =========================
+   Trading Requests columns (ONLY name, email, balance)
+========================= */
+
+const requestColumns: ColumnDef<TradingRequestRow>[] = [
+  {
+    id: "name",
+    header: "Name",
+    cell: ({ row }) => (
+      <div className="font-medium">{fullName(row.original.first_name, row.original.last_name)}</div>
+    ),
+  },
+  {
+    accessorKey: "email",
+    header: "Email",
+    cell: ({ row }) => (
+      <div className="max-w-[320px] truncate">{row.original.email}</div>
+    ),
+  },
+  {
+    id: "available_balance",
+    header: () => <div className="w-full text-right">Balance</div>,
+    cell: ({ row }) => {
+      const raw = row.original.UserBalance?.available_balance ?? "0"
+      return (
+        <div className="w-full text-right font-medium">
+          {formatVNDCompact(raw)}
+        </div>
+      )
+    },
+  },
+]
+
+/* =========================
+   Reusable draggable row for Users table
+========================= */
+
+function DraggableRow({ row }: { row: Row<UserRow> }) {
   const { transform, transition, setNodeRef, isDragging } = useSortable({
     id: row.original.id,
   })
@@ -324,7 +551,7 @@ function DraggableRow({ row }: { row: Row<z.infer<typeof schema>> }) {
       className="relative z-0 data-[dragging=true]:z-10 data-[dragging=true]:opacity-80"
       style={{
         transform: CSS.Transform.toString(transform),
-        transition: transition,
+        transition,
       }}
     >
       {row.getVisibleCells().map((cell) => (
@@ -336,24 +563,34 @@ function DraggableRow({ row }: { row: Row<z.infer<typeof schema>> }) {
   )
 }
 
-export function DataTable({
-  data: initialData,
-}: {
-  data: z.infer<typeof schema>[]
-}) {
-  const [data, setData] = React.useState(() => initialData)
-  const [rowSelection, setRowSelection] = React.useState({})
-  const [columnVisibility, setColumnVisibility] =
-    React.useState<VisibilityState>({})
-  const [columnFilters, setColumnFilters] = React.useState<ColumnFiltersState>(
-    []
+/* =========================
+   Main DataTable
+========================= */
+
+export function DataTable({ data: initial }: { data: DataTablePayload }) {
+  const [users, setUsers] = React.useState<UserRow[]>(() => initial.users ?? [])
+    const [requests, setRequests] = React.useState<TradingRequestRow[]>(
+    () => initial.requests ?? []
   )
+
+  React.useEffect(() => {
+    setRequests(initial.requests ?? [])
+  }, [initial.requests])
+
+
+  // Users table state
+  const [rowSelection, setRowSelection] = React.useState({})
+  const [columnVisibility, setColumnVisibility] = React.useState<VisibilityState>({})
+  const [columnFilters, setColumnFilters] = React.useState<ColumnFiltersState>([])
   const [sorting, setSorting] = React.useState<SortingState>([])
-  const [pagination, setPagination] = React.useState({
-    pageIndex: 0,
-    pageSize: 10,
-  })
+  const [pagination, setPagination] = React.useState({ pageIndex: 0, pageSize: 10 })
   const sortableId = React.useId()
+
+  React.useEffect(() => {
+    // when server data refreshes
+    setUsers(initial.users ?? [])
+  }, [initial.users])
+
   const sensors = useSensors(
     useSensor(MouseSensor, {}),
     useSensor(TouchSensor, {}),
@@ -361,13 +598,13 @@ export function DataTable({
   )
 
   const dataIds = React.useMemo<UniqueIdentifier[]>(
-    () => data?.map(({ id }) => id) || [],
-    [data]
+    () => users?.map(({ id }) => id) || [],
+    [users]
   )
 
-  const table = useReactTable({
-    data,
-    columns,
+  const usersTable = useReactTable({
+    data: users,
+    columns: userColumns,
     state: {
       sorting,
       columnVisibility,
@@ -389,52 +626,31 @@ export function DataTable({
     getFacetedRowModel: getFacetedRowModel(),
     getFacetedUniqueValues: getFacetedUniqueValues(),
   })
+   const requestsTable = useReactTable({
+    data: requests,
+    columns: requestColumns,
+    getCoreRowModel: getCoreRowModel(),
+  })
 
   function handleDragEnd(event: DragEndEvent) {
     const { active, over } = event
     if (active && over && active.id !== over.id) {
-      setData((data) => {
+      setUsers((prev) => {
         const oldIndex = dataIds.indexOf(active.id)
         const newIndex = dataIds.indexOf(over.id)
-        return arrayMove(data, oldIndex, newIndex)
+        return arrayMove(prev, oldIndex, newIndex)
       })
     }
   }
 
   return (
-    <Tabs
-      defaultValue="outline"
-      className="w-full flex-col justify-start gap-6"
-    >
+    <Tabs defaultValue="users" className="w-full flex-col justify-start gap-6">
       <div className="flex items-center justify-between px-4 lg:px-6">
-        <Label htmlFor="view-selector" className="sr-only">
-          View
-        </Label>
-        <Select defaultValue="outline">
-          <SelectTrigger
-            className="flex w-fit @4xl/main:hidden"
-            size="sm"
-            id="view-selector"
-          >
-            <SelectValue placeholder="Select a view" />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem value="outline">Outline</SelectItem>
-            <SelectItem value="past-performance">Past Performance</SelectItem>
-            <SelectItem value="key-personnel">Key Personnel</SelectItem>
-            <SelectItem value="focus-documents">Focus Documents</SelectItem>
-          </SelectContent>
-        </Select>
-        <TabsList className="**:data-[slot=badge]:bg-muted-foreground/30 hidden **:data-[slot=badge]:size-5 **:data-[slot=badge]:rounded-full **:data-[slot=badge]:px-1 @4xl/main:flex">
-          <TabsTrigger value="outline">Outline</TabsTrigger>
-          <TabsTrigger value="past-performance">
-            Past Performance <Badge variant="secondary">3</Badge>
-          </TabsTrigger>
-          <TabsTrigger value="key-personnel">
-            Key Personnel <Badge variant="secondary">2</Badge>
-          </TabsTrigger>
-          <TabsTrigger value="focus-documents">Focus Documents</TabsTrigger>
+        <TabsList className="hidden @4xl/main:flex">
+          <TabsTrigger value="users">Users</TabsTrigger>
+          <TabsTrigger value="trading-requests">Trading Requests</TabsTrigger>
         </TabsList>
+
         <div className="flex items-center gap-2">
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
@@ -445,38 +661,42 @@ export function DataTable({
                 <IconChevronDown />
               </Button>
             </DropdownMenuTrigger>
+
             <DropdownMenuContent align="end" className="w-56">
-              {table
+              {usersTable
                 .getAllColumns()
                 .filter(
                   (column) =>
                     typeof column.accessorFn !== "undefined" &&
                     column.getCanHide()
                 )
-                .map((column) => {
-                  return (
-                    <DropdownMenuCheckboxItem
-                      key={column.id}
-                      className="capitalize"
-                      checked={column.getIsVisible()}
-                      onCheckedChange={(value) =>
-                        column.toggleVisibility(!!value)
-                      }
-                    >
-                      {column.id}
-                    </DropdownMenuCheckboxItem>
-                  )
-                })}
+                .map((column) => (
+                  <DropdownMenuCheckboxItem
+                    key={column.id}
+                    className="capitalize"
+                    checked={column.getIsVisible()}
+                    onCheckedChange={(value) => column.toggleVisibility(!!value)}
+                  >
+                    {column.id}
+                  </DropdownMenuCheckboxItem>
+                ))}
             </DropdownMenuContent>
           </DropdownMenu>
-          <Button variant="outline" size="sm">
+
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => toast.message("Hook Add User here")}
+          >
             <IconPlus />
-            <span className="hidden lg:inline">Add Section</span>
+            <span className="hidden lg:inline">Add User</span>
           </Button>
         </div>
       </div>
+
+      {/* USERS */}
       <TabsContent
-        value="outline"
+        value="users"
         className="relative flex flex-col gap-4 overflow-auto px-4 lg:px-6"
       >
         <div className="overflow-hidden rounded-lg border">
@@ -489,39 +709,35 @@ export function DataTable({
           >
             <Table>
               <TableHeader className="bg-muted sticky top-0 z-10">
-                {table.getHeaderGroups().map((headerGroup) => (
+                {usersTable.getHeaderGroups().map((headerGroup) => (
                   <TableRow key={headerGroup.id}>
-                    {headerGroup.headers.map((header) => {
-                      return (
-                        <TableHead key={header.id} colSpan={header.colSpan}>
-                          {header.isPlaceholder
-                            ? null
-                            : flexRender(
-                                header.column.columnDef.header,
-                                header.getContext()
-                              )}
-                        </TableHead>
-                      )
-                    })}
+                    {headerGroup.headers.map((header) => (
+                      <TableHead key={header.id} colSpan={header.colSpan}>
+                        {header.isPlaceholder
+                          ? null
+                          : flexRender(
+                              header.column.columnDef.header,
+                              header.getContext()
+                            )}
+                      </TableHead>
+                    ))}
                   </TableRow>
                 ))}
               </TableHeader>
+
               <TableBody className="**:data-[slot=table-cell]:first:w-8">
-                {table.getRowModel().rows?.length ? (
+                {usersTable.getRowModel().rows?.length ? (
                   <SortableContext
                     items={dataIds}
                     strategy={verticalListSortingStrategy}
                   >
-                    {table.getRowModel().rows.map((row) => (
+                    {usersTable.getRowModel().rows.map((row) => (
                       <DraggableRow key={row.id} row={row} />
                     ))}
                   </SortableContext>
                 ) : (
                   <TableRow>
-                    <TableCell
-                      colSpan={columns.length}
-                      className="h-24 text-center"
-                    >
+                    <TableCell colSpan={userColumns.length} className="h-24 text-center">
                       No results.
                     </TableCell>
                   </TableRow>
@@ -530,26 +746,24 @@ export function DataTable({
             </Table>
           </DndContext>
         </div>
+
         <div className="flex items-center justify-between px-4">
           <div className="text-muted-foreground hidden flex-1 text-sm lg:flex">
-            {table.getFilteredSelectedRowModel().rows.length} of{" "}
-            {table.getFilteredRowModel().rows.length} row(s) selected.
+            {usersTable.getFilteredSelectedRowModel().rows.length} of{" "}
+            {usersTable.getFilteredRowModel().rows.length} row(s) selected.
           </div>
+
           <div className="flex w-full items-center gap-8 lg:w-fit">
             <div className="hidden items-center gap-2 lg:flex">
               <Label htmlFor="rows-per-page" className="text-sm font-medium">
                 Rows per page
               </Label>
               <Select
-                value={`${table.getState().pagination.pageSize}`}
-                onValueChange={(value) => {
-                  table.setPageSize(Number(value))
-                }}
+                value={`${usersTable.getState().pagination.pageSize}`}
+                onValueChange={(value) => usersTable.setPageSize(Number(value))}
               >
                 <SelectTrigger size="sm" className="w-20" id="rows-per-page">
-                  <SelectValue
-                    placeholder={table.getState().pagination.pageSize}
-                  />
+                  <SelectValue placeholder={usersTable.getState().pagination.pageSize} />
                 </SelectTrigger>
                 <SelectContent side="top">
                   {[10, 20, 30, 40, 50].map((pageSize) => (
@@ -560,46 +774,51 @@ export function DataTable({
                 </SelectContent>
               </Select>
             </div>
+
             <div className="flex w-fit items-center justify-center text-sm font-medium">
-              Page {table.getState().pagination.pageIndex + 1} of{" "}
-              {table.getPageCount()}
+              Page {usersTable.getState().pagination.pageIndex + 1} of{" "}
+              {usersTable.getPageCount()}
             </div>
+
             <div className="ml-auto flex items-center gap-2 lg:ml-0">
               <Button
                 variant="outline"
                 className="hidden h-8 w-8 p-0 lg:flex"
-                onClick={() => table.setPageIndex(0)}
-                disabled={!table.getCanPreviousPage()}
+                onClick={() => usersTable.setPageIndex(0)}
+                disabled={!usersTable.getCanPreviousPage()}
               >
                 <span className="sr-only">Go to first page</span>
                 <IconChevronsLeft />
               </Button>
+
               <Button
                 variant="outline"
                 className="size-8"
                 size="icon"
-                onClick={() => table.previousPage()}
-                disabled={!table.getCanPreviousPage()}
+                onClick={() => usersTable.previousPage()}
+                disabled={!usersTable.getCanPreviousPage()}
               >
                 <span className="sr-only">Go to previous page</span>
                 <IconChevronLeft />
               </Button>
+
               <Button
                 variant="outline"
                 className="size-8"
                 size="icon"
-                onClick={() => table.nextPage()}
-                disabled={!table.getCanNextPage()}
+                onClick={() => usersTable.nextPage()}
+                disabled={!usersTable.getCanNextPage()}
               >
                 <span className="sr-only">Go to next page</span>
                 <IconChevronRight />
               </Button>
+
               <Button
                 variant="outline"
                 className="hidden size-8 lg:flex"
                 size="icon"
-                onClick={() => table.setPageIndex(table.getPageCount() - 1)}
-                disabled={!table.getCanNextPage()}
+                onClick={() => usersTable.setPageIndex(usersTable.getPageCount() - 1)}
+                disabled={!usersTable.getCanNextPage()}
               >
                 <span className="sr-only">Go to last page</span>
                 <IconChevronsRight />
@@ -608,200 +827,64 @@ export function DataTable({
           </div>
         </div>
       </TabsContent>
+
+      {/* TRADING REQUESTS */}
+      {/* TRADING REQUESTS */}
       <TabsContent
-        value="past-performance"
-        className="flex flex-col px-4 lg:px-6"
+        value="trading-requests"
+        className="relative flex flex-col gap-4 overflow-auto px-4 lg:px-6"
       >
-        <div className="aspect-video w-full flex-1 rounded-lg border border-dashed"></div>
-      </TabsContent>
-      <TabsContent value="key-personnel" className="flex flex-col px-4 lg:px-6">
-        <div className="aspect-video w-full flex-1 rounded-lg border border-dashed"></div>
-      </TabsContent>
-      <TabsContent
-        value="focus-documents"
-        className="flex flex-col px-4 lg:px-6"
-      >
-        <div className="aspect-video w-full flex-1 rounded-lg border border-dashed"></div>
-      </TabsContent>
-    </Tabs>
-  )
-}
+        <div className="overflow-hidden rounded-lg border">
+          <Table>
+            <TableHeader className="bg-muted sticky top-0 z-10">
+              {requestsTable.getHeaderGroups().map((headerGroup) => (
+                <TableRow key={headerGroup.id}>
+                  {headerGroup.headers.map((header) => (
+                    <TableHead key={header.id} colSpan={header.colSpan}>
+                      {header.isPlaceholder
+                        ? null
+                        : flexRender(
+                            header.column.columnDef.header,
+                            header.getContext()
+                          )}
+                    </TableHead>
+                  ))}
+                </TableRow>
+              ))}
+            </TableHeader>
 
-const chartData = [
-  { month: "January", desktop: 186, mobile: 80 },
-  { month: "February", desktop: 305, mobile: 200 },
-  { month: "March", desktop: 237, mobile: 120 },
-  { month: "April", desktop: 73, mobile: 190 },
-  { month: "May", desktop: 209, mobile: 130 },
-  { month: "June", desktop: 214, mobile: 140 },
-]
-
-const chartConfig = {
-  desktop: {
-    label: "Desktop",
-    color: "var(--primary)",
-  },
-  mobile: {
-    label: "Mobile",
-    color: "var(--primary)",
-  },
-} satisfies ChartConfig
-
-function TableCellViewer({ item }: { item: z.infer<typeof schema> }) {
-  const isMobile = useIsMobile()
-
-  return (
-    <Drawer direction={isMobile ? "bottom" : "right"}>
-      <DrawerTrigger asChild>
-        <Button variant="link" className="text-foreground w-fit px-0 text-left">
-          {item.header}
-        </Button>
-      </DrawerTrigger>
-      <DrawerContent>
-        <DrawerHeader className="gap-1">
-          <DrawerTitle>{item.header}</DrawerTitle>
-          <DrawerDescription>
-            Showing total visitors for the last 6 months
-          </DrawerDescription>
-        </DrawerHeader>
-        <div className="flex flex-col gap-4 overflow-y-auto px-4 text-sm">
-          {!isMobile && (
-            <>
-              <ChartContainer config={chartConfig}>
-                <AreaChart
-                  accessibilityLayer
-                  data={chartData}
-                  margin={{
-                    left: 0,
-                    right: 10,
-                  }}
-                >
-                  <CartesianGrid vertical={false} />
-                  <XAxis
-                    dataKey="month"
-                    tickLine={false}
-                    axisLine={false}
-                    tickMargin={8}
-                    tickFormatter={(value) => value.slice(0, 3)}
-                    hide
-                  />
-                  <ChartTooltip
-                    cursor={false}
-                    content={<ChartTooltipContent indicator="dot" />}
-                  />
-                  <Area
-                    dataKey="mobile"
-                    type="natural"
-                    fill="var(--color-mobile)"
-                    fillOpacity={0.6}
-                    stroke="var(--color-mobile)"
-                    stackId="a"
-                  />
-                  <Area
-                    dataKey="desktop"
-                    type="natural"
-                    fill="var(--color-desktop)"
-                    fillOpacity={0.4}
-                    stroke="var(--color-desktop)"
-                    stackId="a"
-                  />
-                </AreaChart>
-              </ChartContainer>
-              <Separator />
-              <div className="grid gap-2">
-                <div className="flex gap-2 leading-none font-medium">
-                  Trending up by 5.2% this month{" "}
-                  <IconTrendingUp className="size-4" />
-                </div>
-                <div className="text-muted-foreground">
-                  Showing total visitors for the last 6 months. This is just
-                  some random text to test the layout. It spans multiple lines
-                  and should wrap around.
-                </div>
-              </div>
-              <Separator />
-            </>
-          )}
-          <form className="flex flex-col gap-4">
-            <div className="flex flex-col gap-3">
-              <Label htmlFor="header">Header</Label>
-              <Input id="header" defaultValue={item.header} />
-            </div>
-            <div className="grid grid-cols-2 gap-4">
-              <div className="flex flex-col gap-3">
-                <Label htmlFor="type">Type</Label>
-                <Select defaultValue={item.type}>
-                  <SelectTrigger id="type" className="w-full">
-                    <SelectValue placeholder="Select a type" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="Table of Contents">
-                      Table of Contents
-                    </SelectItem>
-                    <SelectItem value="Executive Summary">
-                      Executive Summary
-                    </SelectItem>
-                    <SelectItem value="Technical Approach">
-                      Technical Approach
-                    </SelectItem>
-                    <SelectItem value="Design">Design</SelectItem>
-                    <SelectItem value="Capabilities">Capabilities</SelectItem>
-                    <SelectItem value="Focus Documents">
-                      Focus Documents
-                    </SelectItem>
-                    <SelectItem value="Narrative">Narrative</SelectItem>
-                    <SelectItem value="Cover Page">Cover Page</SelectItem>
-                  </SelectContent>
-                </Select>
-              </div>
-              <div className="flex flex-col gap-3">
-                <Label htmlFor="status">Status</Label>
-                <Select defaultValue={item.status}>
-                  <SelectTrigger id="status" className="w-full">
-                    <SelectValue placeholder="Select a status" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="Done">Done</SelectItem>
-                    <SelectItem value="In Progress">In Progress</SelectItem>
-                    <SelectItem value="Not Started">Not Started</SelectItem>
-                  </SelectContent>
-                </Select>
-              </div>
-            </div>
-            <div className="grid grid-cols-2 gap-4">
-              <div className="flex flex-col gap-3">
-                <Label htmlFor="target">Target</Label>
-                <Input id="target" defaultValue={item.target} />
-              </div>
-              <div className="flex flex-col gap-3">
-                <Label htmlFor="limit">Limit</Label>
-                <Input id="limit" defaultValue={item.limit} />
-              </div>
-            </div>
-            <div className="flex flex-col gap-3">
-              <Label htmlFor="reviewer">Reviewer</Label>
-              <Select defaultValue={item.reviewer}>
-                <SelectTrigger id="reviewer" className="w-full">
-                  <SelectValue placeholder="Select a reviewer" />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="Eddie Lake">Eddie Lake</SelectItem>
-                  <SelectItem value="Jamik Tashpulatov">
-                    Jamik Tashpulatov
-                  </SelectItem>
-                  <SelectItem value="Emily Whalen">Emily Whalen</SelectItem>
-                </SelectContent>
-              </Select>
-            </div>
-          </form>
+            <TableBody>
+              {requestsTable.getRowModel().rows.length ? (
+                requestsTable.getRowModel().rows.map((row) => (
+                  <TableRow key={row.id}>
+                    {row.getVisibleCells().map((cell) => (
+                      <TableCell key={cell.id}>
+                        {flexRender(
+                          cell.column.columnDef.cell,
+                          cell.getContext()
+                        )}
+                      </TableCell>
+                    ))}
+                  </TableRow>
+                ))
+              ) : (
+                <TableRow>
+                  <TableCell colSpan={requestColumns.length} className="h-24 text-center">
+                    No requests.
+                  </TableCell>
+                </TableRow>
+              )}
+            </TableBody>
+          </Table>
         </div>
-        <DrawerFooter>
-          <Button>Submit</Button>
-          <DrawerClose asChild>
-            <Button variant="outline">Done</Button>
-          </DrawerClose>
-        </DrawerFooter>
-      </DrawerContent>
-    </Drawer>
+
+        <Separator />
+
+        <div className="text-muted-foreground text-sm">
+          Trading Requests table shows only: <b>Name</b>, <b>Email</b>, <b>Balance</b>.
+        </div>
+      </TabsContent>
+
+    </Tabs>
   )
 }

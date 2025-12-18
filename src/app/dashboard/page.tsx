@@ -1,16 +1,53 @@
 import { AppSidebar } from "@/components/app-sidebar"
 import { ChartAreaInteractive } from "@/components/chart-area-interactive"
-import { DataTable } from "@/components/data-table"
 import { SectionCards } from "@/components/section-cards"
 import { SiteHeader } from "@/components/site-header"
-import {
-  SidebarInset,
-  SidebarProvider,
-} from "@/components/ui/sidebar"
+import { SidebarInset, SidebarProvider } from "@/components/ui/sidebar"
+import { DataTableClient } from "@/components/data-table-client"
 
-import data from "./data.json"
+type ApiResponse<T> = {
+  success: boolean
+  data: T
+  timestamp?: string
+}
 
-export default function Page() {
+// /api/user
+export type UserRow = {
+  id: number
+  email: string
+  first_name: string
+  last_name: string
+  phone: string | null
+  is_active: boolean
+}
+
+// /api/user/table
+export type TradingRequestRow = {
+  id: number
+  email: string
+  first_name: string
+  last_name: string
+  UserBalance: { available_balance: string } | null
+}
+
+const API_BASE = process.env.NEXT_PUBLIC_API_BASE ?? "http://localhost:3001"
+
+async function fetchJson<T>(url: string): Promise<T> {
+  const res = await fetch(url, { cache: "no-store" })
+  if (!res.ok) throw new Error(`Failed to fetch ${url}: ${res.status} ${res.statusText}`)
+  return (await res.json()) as T
+}
+
+export default async function Page() {
+  // fetch server lần đầu
+  const [usersRes, requestsRes] = await Promise.all([
+    fetchJson<ApiResponse<UserRow[]>>(`${API_BASE}/api/user`),
+    fetchJson<ApiResponse<TradingRequestRow[]>>(`${API_BASE}/api/user/table`),
+  ])
+
+  const users = usersRes?.success ? usersRes.data : []
+  const initialRequests = requestsRes?.success ? requestsRes.data : []
+
   return (
     <SidebarProvider
       style={
@@ -30,7 +67,13 @@ export default function Page() {
               <div className="px-4 lg:px-6">
                 <ChartAreaInteractive />
               </div>
-              <DataTable data={data} />
+
+              {/* ✅ client polling requests mỗi 30s */}
+              <DataTableClient
+                users={users}
+                initialRequests={initialRequests}
+                apiBase={API_BASE}
+              />
             </div>
           </div>
         </div>
